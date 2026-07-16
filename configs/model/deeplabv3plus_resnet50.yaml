@@ -1,0 +1,9 @@
+# Experiment A (ablation): DeepLabV3+ + ResNet-50 backbone
+# Convolutional reference — no attention mechanisms
+_target_: neural_net.DeepLabV3Plus
+encoder_name: resnet50
+n_channels: 6
+n_classes: 2
+learning_rate: 1.0e-4
+loss_fn: asymmetric_unified_focal
+encoder_weights: null

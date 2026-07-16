@@ -1,0 +1,9 @@
+# Experiment C (variant): DeepLabV3+ + MobileViT-XS backbone
+# ~10.9 M parameters — higher capacity, slightly more compute
+_target_: neural_net.DeepLabV3PlusMobileViT
+backbone: mobilevit_xs
+in_channels: 6
+n_classes: 2
+learning_rate: 1.0e-4
+loss_fn: asymmetric_unified_focal
+encoder_weights: null

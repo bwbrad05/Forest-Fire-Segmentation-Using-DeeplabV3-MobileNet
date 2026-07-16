@@ -1,0 +1,10 @@
+# GPU trainer — tuned for Indonesian dataset (227 images, 512×512)
+accelerator: gpu
+devices: [0]
+precision: 16-mixed        # AMP for memory efficiency on single GPU
+max_epochs: 100
+log_every_n_steps: 5
+benchmark: true
+gradient_clip_val: 5.0
+num_sanity_val_steps: 2
+max_time: "00:06:00:00"    # 6-hour wall time limit

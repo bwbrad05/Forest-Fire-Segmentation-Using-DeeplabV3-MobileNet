@@ -1,0 +1,6 @@
+# Comet ML logger configuration
+# Set COMET_API_KEY environment variable instead of hardcoding api_key here.
+api_key: null
+project_name: deeplabv3plus-mobilevit-indonesia
+workspace: null            # Set to your Comet workspace name
+save_dir: comet_logs

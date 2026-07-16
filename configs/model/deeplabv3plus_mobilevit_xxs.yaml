@@ -1,0 +1,9 @@
+# Experiment C (primary): DeepLabV3+ + MobileViT-XXS backbone
+# ~5.7 M parameters — lightweight and efficient for edge deployment
+_target_: neural_net.DeepLabV3PlusMobileViT
+backbone: mobilevit_xxs
+in_channels: 6            # Landsat-8: B2 B3 B4 B5 B6 B7
+n_classes: 2
+learning_rate: 1.0e-4
+loss_fn: asymmetric_unified_focal
+encoder_weights: null

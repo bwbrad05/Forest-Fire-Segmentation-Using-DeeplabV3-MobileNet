@@ -1,0 +1,17 @@
+# Research: Segmentasi Area Kebakaran Hutan dan Lahan pada Citra Satelit
+# Menggunakan DeepLabV3+ dengan Backbone MobileViT untuk Wilayah Tropis Indonesia
+#
+# Visualization configuration — qualitative results (input, ground truth, prediction)
+name: Visualize-DeepLabV3Plus-MobileViT
+model_name: &model deeplabv3plus_mobilevit_xxs
+
+defaults:
+  - _self_
+  - model: *model
+  - dataset: indonesia
+
+ckpt_path: null          # required — path to a trained checkpoint (.ckpt)
+split: test              # which split to visualize: train | val | test
+num_samples: 8           # how many samples to render (null = all)
+out_dir: outputs/visualizations
+dpi: 130                 # figure resolution

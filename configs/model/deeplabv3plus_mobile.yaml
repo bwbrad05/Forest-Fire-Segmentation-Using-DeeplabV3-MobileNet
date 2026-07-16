@@ -1,0 +1,6 @@
+---
+_target_: neural_net.DeepLabV3Plus
+n_classes: 2
+n_channels: 12
+encoder_name: "timm-mobilenetv3_small_100"
+learning_rate: 0.0001

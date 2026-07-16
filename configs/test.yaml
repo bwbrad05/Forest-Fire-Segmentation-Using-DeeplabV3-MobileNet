@@ -1,0 +1,12 @@
+---
+name: Magnifier
+
+defaults:
+  - _self_
+  - model: deeplabv3plus_mobilevit_xxs
+  - trainer: default_gpu
+  - dataset: indonesia
+  - logger: comet
+
+mode: test
+ckpt_path: null

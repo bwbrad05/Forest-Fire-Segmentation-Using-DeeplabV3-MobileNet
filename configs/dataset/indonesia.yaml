@@ -1,0 +1,9 @@
+# Indonesian Burned Area Dataset — Landsat-8, 227 images, 512×512
+_target_: lightning_modules.IndonesiaDataModule
+root: "data/indonesia"
+batch_size: 8
+num_workers: 4
+test_fold: 0            # ???  must be overridden via CLI for cross-validation
+sensor: landsat8
+patch_size: 512
+cloud_threshold: 0.3    # Skip patches with >30% cloud coverage

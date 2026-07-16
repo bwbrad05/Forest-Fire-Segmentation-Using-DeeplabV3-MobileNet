@@ -1,0 +1,15 @@
+# Research: Segmentasi Area Kebakaran Hutan dan Lahan pada Citra Satelit
+# Menggunakan DeepLabV3+ dengan Backbone MobileViT untuk Wilayah Tropis Indonesia
+#
+# Evaluation configuration
+name: Evaluate-DeepLabV3Plus-MobileViT
+model_name: &model deeplabv3plus_mobilevit_xxs
+
+defaults:
+  - _self_
+  - model: *model
+  - trainer: default_gpu
+  - dataset: indonesia
+
+mode: test           # test | efficiency
+ckpt_path: null      # required for mode=test

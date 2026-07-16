@@ -1,0 +1,9 @@
+# Experiment B (ablation): DeepLabV3+ + MobileNetV3-Small backbone
+# Lightweight convolutional reference — comparable to MobileViT-XXS
+_target_: neural_net.DeepLabV3Plus
+encoder_name: timm-mobilenetv3_small_100
+n_channels: 6
+n_classes: 2
+learning_rate: 1.0e-4
+loss_fn: asymmetric_unified_focal
+encoder_weights: null
