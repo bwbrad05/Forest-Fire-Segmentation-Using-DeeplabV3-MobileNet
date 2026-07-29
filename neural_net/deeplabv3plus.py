@@ -48,6 +48,7 @@ class DeepLabV3Plus(pl.LightningModule):
         learning_rate: float = 1e-4,
         loss_fn: str = "asymmetric_unified_focal",
         encoder_weights: Optional[str] = None,
+        tta: bool = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -69,16 +70,17 @@ class DeepLabV3Plus(pl.LightningModule):
         metric_kwargs = dict(task="binary") if n_classes == 2 else dict(
             task="multiclass", num_classes=n_classes
         )
+        # For binary segmentation the Dice coefficient equals the F1 score, which
+        # is already reported as ``test_f1`` — so no separate Dice metric is kept.
+        # (``tm.Dice`` was also removed in torchmetrics >= 1.8, breaking instantiation.)
+        # This matches the metric set of the primary DeepLabV3PlusMobileViT model.
         self.test_metrics = tm.MetricCollection(
             {
                 "test_iou": tm.JaccardIndex(**metric_kwargs),
-                "test_dice": tm.Dice(**metric_kwargs) if n_classes == 2 else tm.Dice(
-                    num_classes=n_classes, average="macro"
-                ),
+                "test_f1": tm.F1Score(**metric_kwargs),
                 "test_precision": tm.Precision(**metric_kwargs),
                 "test_recall": tm.Recall(**metric_kwargs),
                 "test_accuracy": tm.Accuracy(**metric_kwargs),
-                "test_f1": tm.F1Score(**metric_kwargs),
             }
         )
         self.batch_to_log = [0, 5]
@@ -120,8 +122,11 @@ class DeepLabV3Plus(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         masks, images = batch["mask"].float(), batch["post"].float()
         masks = masks.squeeze(1)
-        logits = self(images)
-        preds = logits.argmax(dim=1)
+        if self.hparams.get("tta", False):
+            # 8-way D4 test-time augmentation (see utils.tta_predict).
+            preds = utils.tta_predict(self.forward, images).argmax(dim=1)
+        else:
+            preds = self(images).argmax(dim=1)
         self.test_metrics.update(preds, masks.long())
 
         if batch_idx in self.batch_to_log and self.logger is not None:

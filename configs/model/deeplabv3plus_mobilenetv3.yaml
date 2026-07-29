@@ -1,9 +1,12 @@
 # Experiment B (ablation): DeepLabV3+ + MobileNetV3-Small backbone
-# Lightweight convolutional reference — comparable to MobileViT-XXS
+# Lightweight convolutional reference for the "mobile" class.
+# ~2.16 M parameters, ~5.9 GFLOPs @ 8x512x512 (measured) — note MobileViT-XXS
+# reaches similar compute with FEWER params (1.45 M).
 _target_: neural_net.DeepLabV3Plus
 encoder_name: timm-mobilenetv3_small_100
-n_channels: 6
+n_channels: 8             # Landsat-8: B1 B2 B3 B4 B5 B6 B7 B9 (paper Table I)
 n_classes: 2
 learning_rate: 1.0e-4
 loss_fn: asymmetric_unified_focal
 encoder_weights: null
+tta: false                # set true (model.tta=true) for 8-way test-time augmentation

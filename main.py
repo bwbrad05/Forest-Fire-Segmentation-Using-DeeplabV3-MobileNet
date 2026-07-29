@@ -21,9 +21,14 @@ python main.py mode=test model=deeplabv3plus_mobilevit_xxs ckpt_path=<path>
 
 # Run 5-fold cross-validation
 python main.py mode=crossval model=deeplabv3plus_mobilevit_xxs dataset=indonesia
+
+# Efficiency comparison table for all four thesis models (params / GFLOPs / latency)
+python main.py mode=efficiency_sweep
 """
 
+import csv
 import logging
+from pathlib import Path
 
 import hydra
 import pytorch_lightning as pl
@@ -37,10 +42,67 @@ import utils
 log = logging.getLogger(__name__)
 
 
+def make_callbacks():
+    """Build a fresh set of callbacks.
+
+    ModelCheckpoint and EarlyStopping hold per-run state (best_model_path,
+    patience counters), so each cross-validation fold needs its own instances.
+    """
+    return [
+        pl.callbacks.ModelCheckpoint(
+            monitor="val_loss",
+            save_top_k=3,
+            mode="min",
+            save_last=True,
+            filename="{epoch}-{val_loss:.4f}-{val_iou:.4f}",
+        ),
+        pl.callbacks.EarlyStopping(
+            monitor="val_loss",
+            patience=20,
+            mode="min",
+        ),
+        pl.callbacks.LearningRateMonitor(logging_interval="epoch"),
+        pl.callbacks.RichModelSummary(max_depth=3),
+        pl.callbacks.RichProgressBar(),
+    ]
+
+
 @hydra.main(version_base=None, config_path="configs", config_name="train")
 def main(cfg: DictConfig):
     # Reproducibility
     pl.seed_everything(47, True)
+
+    mode = cfg.get("mode", "train")
+
+    # ------------------------------------------------------------------ #
+    # efficiency_sweep — self-contained: profiles all four thesis models
+    # in one command. Handled up front so it needs no Trainer/DataModule
+    # (and therefore runs on a CPU-only box regardless of the default GPU
+    # trainer). Emits a params / GFLOPs / GMACs / latency comparison table.
+    # ------------------------------------------------------------------ #
+    if mode == "efficiency_sweep":
+        from omegaconf import OmegaConf
+        from utils import efficiency_table
+
+        model_dir = Path(__file__).parent / "configs" / "model"
+        thesis_models = [
+            "deeplabv3plus_mobilevit_xxs",   # Experiment C (primary)
+            "deeplabv3plus_mobilevit_xs",    # Experiment C (variant)
+            "deeplabv3plus_mobilenetv3",     # Experiment B (ablation)
+            "deeplabv3plus_resnet50",        # Experiment A (ablation)
+        ]
+        entries = []
+        for name in thesis_models:
+            mcfg = OmegaConf.load(model_dir / f"{name}.yaml")
+            model = instantiate(mcfg)
+            n_ch = mcfg.get("in_channels", mcfg.get("n_channels", 8))
+            entries.append((name, model, n_ch))
+
+        efficiency_table(
+            entries,
+            csv_path=Path("lightning_logs") / "efficiency_report.csv",
+        )
+        return
 
     # ------------------------------------------------------------------ #
     # Model
@@ -75,46 +137,21 @@ def main(cfg: DictConfig):
     else:
         logger = True   # default TensorBoard
 
-    # ------------------------------------------------------------------ #
     # Callbacks
-    # ------------------------------------------------------------------ #
-    callbacks = [
-        pl.callbacks.ModelCheckpoint(
-            monitor="val_loss",
-            save_top_k=3,
-            mode="min",
-            save_last=True,
-            filename="{epoch}-{val_loss:.4f}-{val_iou:.4f}",
-        ),
-        pl.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=20,
-            mode="min",
-        ),
-        pl.callbacks.LearningRateMonitor(logging_interval="epoch"),
-        pl.callbacks.RichModelSummary(max_depth=3),
-        pl.callbacks.RichProgressBar(),
-    ]
 
-    # ------------------------------------------------------------------ #
+    callbacks = make_callbacks()
+
     # Trainer
-    # ------------------------------------------------------------------ #
     trainer = pl.Trainer(
         **cfg["trainer"],
         logger=logger,
         callbacks=callbacks,
     )
 
-    # ------------------------------------------------------------------ #
     # DataModule
-    # ------------------------------------------------------------------ #
     datamodule = instantiate(cfg["dataset"])
 
-    # ------------------------------------------------------------------ #
-    # Execution modes
-    # ------------------------------------------------------------------ #
-    mode = cfg.get("mode", "train")
-
+    # Execution modes (``mode`` resolved near the top of main())
     if mode == "train":
         trainer.fit(pl_model, datamodule=datamodule)
         # fast_dev_run disables checkpointing, so there is no "best" checkpoint
@@ -142,33 +179,93 @@ def main(cfg: DictConfig):
             cfg["dataset"]["test_fold"] = fold
             fold_dm = instantiate(cfg["dataset"])
             fold_model = instantiate(cfg["model"])
-            fold_trainer = pl.Trainer(**cfg["trainer"], logger=False, enable_progress_bar=True)
+            # Same protocol as `mode=train`: monitored checkpointing so that
+            # ckpt_path="best" below resolves to the best-val_loss epoch rather
+            # than the last one, plus a per-fold CSV log for the loss/IoU curves.
+            fold_trainer = pl.Trainer(
+                **cfg["trainer"],
+                logger=loggers.CSVLogger(
+                    "lightning_logs",
+                    name=f"crossval_{cfg.get('model_name', 'model')}",
+                    version=f"fold{fold}",
+                ),
+                callbacks=make_callbacks(),
+            )
             fold_trainer.fit(fold_model, datamodule=fold_dm)
             results = fold_trainer.test(fold_model, datamodule=fold_dm, ckpt_path="best")
             fold_results.append(results[0] if results else {})
             log.info("Fold %d results: %s", fold, results)
 
-        # Print aggregated results
+        # Print aggregated results, and persist them so a closed terminal
+        # does not lose the outcome of a multi-hour run.
         if fold_results:
-            all_keys = fold_results[0].keys()
+            all_keys = sorted(fold_results[0].keys())
+            summary = {}
             print("\n===== 5-Fold Cross-Validation Summary =====")
-            for key in sorted(all_keys):
+            for key in all_keys:
                 vals = [r.get(key, 0) for r in fold_results]
                 mean = sum(vals) / len(vals)
                 std  = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
+                summary[key] = (mean, std)
                 print(f"  {key:<35s}: {mean:.4f} ± {std:.4f}")
             print("=" * 47 + "\n")
 
+            out_dir = Path("lightning_logs") / f"crossval_{cfg.get('model_name', 'model')}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            with open(out_dir / "summary.csv", "w", newline="", encoding="utf8") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(["metric"] + [f"fold{i}" for i in range(len(fold_results))]
+                                + ["mean", "std"])
+                for key in all_keys:
+                    mean, std = summary[key]
+                    writer.writerow([key] + [r.get(key, "") for r in fold_results]
+                                    + [f"{mean:.6f}", f"{std:.6f}"])
+            log.info("Cross-validation summary written to %s", out_dir / "summary.csv")
+
     elif mode == "efficiency":
         from utils import model_efficiency_report
-        n_ch = getattr(pl_model.hparams, "in_channels", 6)
+        # DeepLabV3PlusMobileViT stores the band count as ``in_channels`` while the
+        # SMP-native ablation baseline (DeepLabV3Plus) stores it as ``n_channels``.
+        # Check both so ResNet/MobileNetV3 aren't silently profiled at 6 channels.
+        hp = pl_model.hparams
+        n_ch = hp.get("in_channels", hp.get("n_channels", 8))
         model_efficiency_report(pl_model, input_shape=(1, n_ch, 512, 512))
         return
 
     elif mode == "lr_find":
         tuner = Tuner(trainer)
-        suggestion = tuner.lr_find(pl_model, datamodule=datamodule).suggestion()
+        lr_finder = tuner.lr_find(pl_model, datamodule=datamodule)
+        suggestion = lr_finder.suggestion()
         log.info("Suggested LR: %s", suggestion)
+
+        # Persist the result so a headless/overnight run isn't lost: the
+        # suggested LR, the full loss-vs-LR sweep (for the thesis plot), and a
+        # rendered PNG of the curve with the suggestion marked.
+        name = cfg.get("model_name", "model")
+        out_dir = Path("lightning_logs")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        results = getattr(lr_finder, "results", {}) or {}
+        lrs = results.get("lr", [])
+        losses = results.get("loss", [])
+        with open(out_dir / f"lr_find_{name}.csv", "w", newline="", encoding="utf8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["suggested_lr", suggestion])
+            writer.writerow(["lr", "loss"])
+            for lr, loss in zip(lrs, losses):
+                writer.writerow([lr, loss])
+
+        try:
+            import matplotlib
+            matplotlib.use("Agg")            # headless-safe
+            fig = lr_finder.plot(suggest=True)
+            fig.savefig(out_dir / f"lr_find_{name}.png", dpi=120, bbox_inches="tight")
+        except Exception as e:                # plotting is best-effort
+            log.warning("Could not save lr_find plot: %s", e)
+
+        print(f"\nSuggested LR for {name}: {suggestion}")
+        print(f"  sweep: {out_dir / f'lr_find_{name}.csv'}")
+        print(f"  plot : {out_dir / f'lr_find_{name}.png'}\n")
         return
 
     # Log model name tag

@@ -133,7 +133,7 @@ def main(cfg: DictConfig):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # ------------------------------------------------------------------ #
-    # Model — instantiate architecture, then load trained weights
+    # Model: instantiate architecture, then load trained weights
     # ------------------------------------------------------------------ #
     model = instantiate(cfg["model"])
     state = torch.load(ckpt_path, map_location=device)
@@ -147,7 +147,7 @@ def main(cfg: DictConfig):
     log.info("Loaded checkpoint: %s", ckpt_path)
 
     # ------------------------------------------------------------------ #
-    # Data — pick the requested split
+    # Data: pick the requested split
     # ------------------------------------------------------------------ #
     datamodule = instantiate(cfg["dataset"])
     stage = "fit" if cfg.split in ("train", "val") else "test"

@@ -144,6 +144,11 @@ class DeepLabV3PlusMobileViT(pl.LightningModule):
         Pretrained weights tag. Set None when in_channels != 3.
     bce_pos_weight : float
         Positive class weight for BCE+Dice loss (only used when loss_fn='bce_dice').
+    tta : bool
+        If True, apply 8-way (D4) test-time augmentation during ``test``/``predict``:
+        each tile is predicted in all flip/rotation orientations and the class
+        probabilities are averaged. Adds inference cost (~8×) for a small,
+        retraining-free IoU/F1 gain. Ignored for the ``bce_dice`` binary path.
     """
 
     def __init__(
@@ -155,6 +160,7 @@ class DeepLabV3PlusMobileViT(pl.LightningModule):
         loss_fn: Literal["asymmetric_unified_focal", "bce_dice"] = "asymmetric_unified_focal",
         encoder_weights: Optional[str] = None,
         bce_pos_weight: float = 10.0,
+        tta: bool = False,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -276,11 +282,16 @@ class DeepLabV3PlusMobileViT(pl.LightningModule):
 
         # Measure inference time for efficiency evaluation
         start = time.perf_counter()
-        logits = self(images)
+        if self.hparams.get("tta", False) and not self._binary_loss:
+            # 8-way D4 test-time augmentation: average class probabilities over
+            # all flip/rotation orientations, then take the hard label.
+            preds = utils.tta_predict(self.forward, images).argmax(dim=1)
+        else:
+            logits = self(images)
+            preds = logits.argmax(dim=1) if not self._binary_loss else (logits.squeeze(1) > 0).long()
         elapsed = time.perf_counter() - start
         self._inference_times.append(elapsed / images.shape[0])
 
-        preds = logits.argmax(dim=1) if not self._binary_loss else (logits.squeeze(1) > 0).long()
         self.test_metrics.update(preds, masks.long())
 
         if batch_idx in self.batch_to_log and self.logger is not None:

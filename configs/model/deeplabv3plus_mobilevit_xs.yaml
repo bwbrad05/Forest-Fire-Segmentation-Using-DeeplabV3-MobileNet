@@ -1,9 +1,10 @@
 # Experiment C (variant): DeepLabV3+ + MobileViT-XS backbone
-# ~10.9 M parameters — higher capacity, slightly more compute
+# ~2.13 M parameters, ~11.6 GFLOPs @ 8x512x512 (measured) — higher capacity
 _target_: neural_net.DeepLabV3PlusMobileViT
 backbone: mobilevit_xs
-in_channels: 6
+in_channels: 8            # Landsat-8: B1 B2 B3 B4 B5 B6 B7 B9 (paper Table I)
 n_classes: 2
 learning_rate: 1.0e-4
 loss_fn: asymmetric_unified_focal
 encoder_weights: null
+tta: false                # set true (model.tta=true) for 8-way test-time augmentation

@@ -27,21 +27,29 @@ logger = logging.getLogger(__name__)
 # Previous values were generic Landsat-8 SR defaults (DN 0-10000) that did NOT
 # match this dataset's scale (actual values reach ~18000), leaving inputs at
 # mean ~+12 / std ~8 instead of the intended mean~0 / std~1. Recomputed 2026-07-10.
-# NOTE: band identity/order is still unconfirmed against the Prabowo dataset docs
-# (data has 8 bands, only the first 6 are used) — see PAPER_COMPARISON.md Temuan 2.
-# Recomputing these stats is correct regardless, since each band is z-scored by
-# its own statistics.
-LANDSAT8_MEANS = torch.tensor([11592.3, 10282.3, 9015.6, 7896.5, 18340.9, 11298.5])
-LANDSAT8_STDS  = torch.tensor([ 6431.2,  6780.0,  6697.5, 7130.1,  7922.3,  6089.8])
+# Band order, established empirically from all 227 images (2026-07-17):
+#   0=B1 Coastal  1=B2 Blue  2=B3 Green  3=B4 Red
+#   4=B5 NIR      5=B6 SWIR1 6=B7 SWIR2  7=B9 Cirrus
+# This is the standard Landsat-8 30 m stack (B8 Pan is 15 m and omitted), and
+# matches the 8 channels reported in the paper (Table I).
+#
+# Two facts pinned the order down:
+#  - the NIR reflectance peak sits at index 4, so the stack starts at B1, not
+#    B2. An earlier 6-band cut therefore silently dropped B7 (SWIR2) -- the band
+#    the Normalized Burn Ratio depends on, NBR = (B5 - B7)/(B5 + B7).
+#  - index 7 is spectral, not a QA mask: ~8k distinct values, no zero pixels and
+#    0.80 neighbour correlation. Its ~0.0 correlation with every surface band is
+#    expected of B9, which water vapour absorption keeps from seeing the ground.
+#
+# Stats are per-band mean/std over every pixel of all 227 images.
+LANDSAT8_MEANS = torch.tensor([11592.3, 10282.3, 9015.6, 7896.5, 18340.9, 11298.5, 6352.3, 485.8])
+LANDSAT8_STDS  = torch.tensor([ 6431.2,  6780.0,  6697.5, 7130.1,  7922.3,  6089.8, 4739.9, 855.6])
 
 SENSOR_STATS = {
     "landsat8":  (LANDSAT8_MEANS,  LANDSAT8_STDS),
 }
 
-
-# --------------------------------------------------------------------------- #
 # Cloud-masking helper
-# --------------------------------------------------------------------------- #
 
 def apply_cloud_mask(image, cloud_mask, fill_value=0.0):
     if cloud_mask is None:
@@ -55,9 +63,7 @@ def cloud_coverage_fraction(cloud_mask):
     return cloud_mask.float().mean().item()
 
 
-# --------------------------------------------------------------------------- #
 # Dataset
-# --------------------------------------------------------------------------- #
 
 class IndonesiaDataset(Dataset):
     """
@@ -97,16 +103,34 @@ class IndonesiaDataset(Dataset):
         self.patch_size = patch_size
         self.means, self.stds = SENSOR_STATS[sensor]
 
-        # Load file IDs from splits parquet, or fall back to directory scan
-        try:
+        # Resolve fold membership. Prefer a reproducible splits.parquet; if it is
+        # absent, fall back to an on-the-fly SCENE-aware split so tiles from the
+        # same acquisition never leak across folds. A splits.parquet that exists
+        # but is malformed is a hard error — never a silent fall-through, which is
+        # how the old code masked a wrong column name and reverted to a leaky
+        # per-tile mod-5 split without warning.
+        splits_path = self.root / "splits.parquet"
+        if splits_path.exists():
             import polars as pl
-            df = pl.read_parquet(self.root / "splits.parquet")
-            df = df.filter(pl.col("fold").is_in(folds))
-            file_ids = df["files"].to_list()
-        except Exception:
+            df = pl.read_parquet(splits_path)
+            if "files" not in df.columns or "fold" not in df.columns:
+                raise KeyError(
+                    f"{splits_path} has columns {df.columns}; expected 'files' and "
+                    "'fold'. Regenerate it with:\n  python scripts/sanity_and_splits.py "
+                    f"--root {self.root} --create --overwrite"
+                )
+            file_ids = df.filter(pl.col("fold").is_in(folds))["files"].to_list()
+        else:
+            from lightning_modules.scene_splits import assign_scene_folds
+            logger.warning(
+                "splits.parquet not found at %s — using an on-the-fly scene-aware "
+                "fold split (deterministic, but NOT the paper's per-tile split). "
+                "Run scripts/sanity_and_splits.py --create for a reproducible file.",
+                splits_path,
+            )
             all_files = sorted(p.stem for p in (self.root / "images").glob("*.tif"))
-            fold_assignments = [i % 5 for i in range(len(all_files))]
-            file_ids = [f for f, fold in zip(all_files, fold_assignments) if fold in folds]
+            fold_map = assign_scene_folds(all_files, n_folds=5)
+            file_ids = [f for f in all_files if fold_map[f] in folds]
 
         self.samples = []
         for fid in file_ids:
@@ -165,9 +189,7 @@ class IndonesiaDataset(Dataset):
         return (image - means) / (stds + 1e-8)
 
 
-# --------------------------------------------------------------------------- #
 # DataModule
-# --------------------------------------------------------------------------- #
 
 class IndonesiaDataModule(pl.LightningDataModule):
     """
@@ -245,9 +267,7 @@ class IndonesiaDataModule(pl.LightningDataModule):
     def predict_dataloader(self): return self._loader(self.test_dataset)
 
 
-# --------------------------------------------------------------------------- #
 # I/O helpers
-# --------------------------------------------------------------------------- #
 
 def _read_tif(path):
     """Read a GeoTIFF and return float32 tensor of shape (C, H, W)."""
@@ -276,9 +296,7 @@ def _ensure_size(tensor, size, is_mask=False):
     ).squeeze(0)
 
 
-# --------------------------------------------------------------------------- #
 # Augmentation
-# --------------------------------------------------------------------------- #
 
 def _build_augmentation():
     def augment(image, mask):

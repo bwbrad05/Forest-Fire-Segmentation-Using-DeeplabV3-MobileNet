@@ -1,9 +1,13 @@
 # Experiment A (ablation): DeepLabV3+ + ResNet-50 backbone
 # Convolutional reference — no attention mechanisms
+# ~26.7 M parameters, ~75.2 GFLOPs @ 8x512x512 (measured)
 _target_: neural_net.DeepLabV3Plus
 encoder_name: resnet50
-n_channels: 6
+n_channels: 8             # Landsat-8: B1 B2 B3 B4 B5 B6 B7 B9 (paper Table I)
 n_classes: 2
-learning_rate: 1.0e-4
+# Paper §IV-E uses LR=0.01 for the ResNet DeepLabV3+ family (vs 0.0001 for the
+# mobile family). Use 0.01 here for an apples-to-apples ResNet ablation.
+learning_rate: 1.0e-2
 loss_fn: asymmetric_unified_focal
 encoder_weights: null
+tta: false                # set true (model.tta=true) for 8-way test-time augmentation

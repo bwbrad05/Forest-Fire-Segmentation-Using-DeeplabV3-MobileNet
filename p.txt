@@ -1,0 +1,6 @@
+learning rate, 
+jumlah parameter (perbedaan) (check overfit), 
+cek networknya, 
+cek gflop, 
+cari keseimbangan dengan model besar pada paper
+menyesuaikan (gambar kompleks, butuh network yang kompleks)

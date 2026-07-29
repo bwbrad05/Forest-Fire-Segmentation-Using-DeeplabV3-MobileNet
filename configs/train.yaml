@@ -12,5 +12,5 @@ defaults:
   - dataset: indonesia
   - logger: comet
 
-mode: train          # train | test | predict | crossval | efficiency | lr_find
+mode: train          # train | test | predict | crossval | efficiency | efficiency_sweep | lr_find
 ckpt_path: null

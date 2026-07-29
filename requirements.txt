@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# Requirements for: Segmentasi Area Kebakaran Hutan dan Lahan pada Citra Satelit
+#   DeepLabV3+ with MobileViT backbone (Bradley Widjaja - 5025231036)
+#
+# Generated from the working .venv (Python 3.11, Windows, CPU build).
+#
+# NOTE on PyTorch: the pinned torch/torchvision below resolve to CPU builds on
+# Windows. Do NOT just `pip install -r requirements.txt` on a CUDA machine --
+# you will get a CPU build and the GPU will sit idle.
+#
+#   CPU machine:
+#     pip install torch==2.12.0 torchvision==0.27.0 --index-url https://download.pytorch.org/whl/cpu
+#
+#   CUDA machine (install FIRST, then `pip install -r requirements.txt`):
+#     pip install torch==2.12.0 torchvision==0.27.0 --index-url https://download.pytorch.org/whl/cu124
+#     (swap cu124 for the CUDA version your driver supports -- see https://pytorch.org)
+#
+#   Verify the GPU is actually visible before training:
+#     python -c "import torch; print(torch.cuda.is_available())"
+# ---------------------------------------------------------------------------
+
+# --- Deep learning core ---
+torch==2.12.0
+torchvision==0.27.0
+torchmetrics==1.9.0
+pytorch-lightning==2.6.5
+
+# --- Model / backbone ---
+timm==1.0.27
+segmentation_models_pytorch==0.5.0
+
+# --- Config management ---
+hydra-core==1.3.2
+omegaconf==2.3.0
+
+# --- Data / geospatial ---
+rasterio==1.4.4
+tifffile==2026.3.3
+numpy==2.4.6
+polars==1.41.2
+pandas==3.0.3
+pillow==12.2.0
+scikit-image==0.26.0
+
+# --- Visualisation / logging ---
+matplotlib==3.10.9
+rich==15.0.0
+
+# --- Experiment tracking (optional; TensorBoard/CSV used if absent) ---
+comet_ml==3.58.1
