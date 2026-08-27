@@ -78,6 +78,42 @@ def report_split(fold_map, n_folds):
           f"({'OK - no spatial leakage' if leaked == 0 else 'LEAKAGE present'})")
 
 
+def inspect_parquet(splits_path):
+    """Report the fold layout of an EXISTING splits file.
+
+    Without this the script could confirm the file was present but not what was
+    in it, so "is this the scene-aware split or the leaky per-tile one?" — the
+    question that decides whether a result is comparable — had no answer.
+    """
+    try:
+        import polars as pl
+        df = pl.read_parquet(splits_path)
+        columns = df.columns
+        files = df["files"].to_list() if "files" in columns else []
+        folds = df["fold"].to_list() if "fold" in columns else []
+    except Exception as e:
+        print(f"  could not read it: {e}")
+        return
+
+    if not files or not folds:
+        print(f"  columns are {columns}; expected 'files' and 'fold'. "
+              "Regenerate with --create --overwrite.")
+        return
+
+    fold_map = dict(zip(files, folds))
+    n_folds = max(folds) + 1
+    report_split(fold_map, n_folds)
+
+    leaked = count_cross_fold_scenes(fold_map)
+    protocol = "scene-aware (honest)" if leaked == 0 else "per-tile (LEAKY, paper-comparable)"
+    note = "" if "scene" in columns else "  [no scene column - written by an older version]"
+    print()
+    print(f"Protocol: {protocol}{note}")
+    if leaked:
+        print("  Results from this split are inflated. For the honest protocol:")
+        print("    python scripts/sanity_and_splits.py --root data/indonesia --create --overwrite")
+
+
 def write_parquet(splits_path, ids, fold_map):
     """Write files/fold/scene, preferring polars, then pandas, then CSV."""
     rows_files = list(ids)
@@ -151,6 +187,7 @@ def main():
     if not args.create:
         if splits_path.exists():
             print("\nsplits.parquet exists at", splits_path)
+            inspect_parquet(splits_path)
         else:
             print("\nsplits.parquet not found. Run with --create to generate one.")
         return

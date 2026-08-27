@@ -211,10 +211,10 @@ application that is the preferable direction to err.
   push this further. This matches the Part A.2 diagnosis.
 - **The inference times are on different machines** (GPU vs. laptop CPU). Do not put them in
   the same comparison — use `mode=efficiency_sweep` on one machine for the latency table.
-- **Confirm the split protocol** before quoting the number as scene-aware. On the GPU box,
-  `data/indonesia/splits.parquet` must have a `scene` column and folds of 46/46/45/45/45
-  tiles. If it does not, the run used the leaky per-tile split and 0.7191 is not the honest
-  figure.
+- ~~**Confirm the split protocol** before quoting the number as scene-aware.~~
+  **Resolved 2026-08-28.** Checked directly on the GPU box: folds of 46/46/45/45/45 tiles,
+  81 scenes, **0 scenes crossing folds** — identical to the laptop. The run used the
+  scene-aware split, so **0.7191 is the honest figure** and can be quoted as such.
 
 ---
 

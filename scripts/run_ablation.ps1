@@ -34,6 +34,13 @@
 .PARAMETER Model
     Model config name (default deeplabv3plus_mobilevit_xxs).
 
+.PARAMETER Python
+    Interpreter to use (default: whatever 'python' resolves to). Pass an absolute
+    path when 'conda activate' shadows torch's DLLs -- a known Windows failure
+    where `import torch` dies with WinError 1114 under the activated env but
+    succeeds when the env's python.exe is invoked directly, e.g.
+      -Python C:\Users\Admin\.conda\envs\firenet-gpu\python.exe
+
 .PARAMETER DryRun
     Print the commands without running them.
 
@@ -56,6 +63,7 @@ param(
     [int]$Epochs = 100,
     [int]$Fold = 0,
     [string]$Model = "deeplabv3plus_mobilevit_xxs",
+    [string]$Python = "python",
     [switch]$DryRun,
     [switch]$Force
 )
@@ -106,10 +114,10 @@ Write-Host "`n=== Preflight ===" -ForegroundColor Cyan
 
 # Skipped under -DryRun so the plan can be reviewed on a laptop with no GPU.
 if (-not $DryRun) {
-    $gpuCheck = python -c "import torch, sys; print(torch.__version__, torch.version.cuda, torch.cuda.is_available()); sys.exit(0 if torch.cuda.is_available() else 1)"
+    $gpuCheck = & $Python -c "import torch, sys; print(torch.__version__, torch.version.cuda, torch.cuda.is_available()); sys.exit(0 if torch.cuda.is_available() else 1)"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  torch reports: $gpuCheck" -ForegroundColor Red
-        throw "CUDA is not available. Activate the GPU env (conda activate firenet-gpu) or reinstall torch from the CUDA index -- see scripts/setup_gpu.ps1."
+        throw "torch could not report an available CUDA device using '$Python'. If 'import torch' fails only under the activated env, pass the interpreter directly, e.g. -Python C:\Users\Admin\.conda\envs\firenet-gpu\python.exe"
     }
     Write-Host "  torch / cuda / available : $gpuCheck" -ForegroundColor Green
 } else {
@@ -121,6 +129,7 @@ if (-not (Test-Path $splits)) {
     throw "Missing $splits. Create it first:`n  python scripts/sanity_and_splits.py --root data/indonesia --create"
 }
 Write-Host "  splits.parquet           : found" -ForegroundColor Green
+Write-Host "  interpreter              : $Python"
 Write-Host "  model / epochs / fold    : $Model / $Epochs / $Fold"
 Write-Host "  variants to run          : $($Variants.Count)"
 
@@ -163,12 +172,12 @@ foreach ($v in $Variants) {
 
     Write-Host "`n=== $($v.Name) ===" -ForegroundColor Cyan
     Write-Host "  $($v.Desc)" -ForegroundColor Gray
-    Write-Host "  python $($cmdArgs -join ' ')" -ForegroundColor DarkGray
+    Write-Host "  $Python $($cmdArgs -join ' ')" -ForegroundColor DarkGray
 
     if ($DryRun) { continue }
 
     $started = Get-Date
-    python @cmdArgs
+    & $Python @cmdArgs
     $exit = $LASTEXITCODE
     $elapsed = (Get-Date) - $started
 
@@ -190,7 +199,7 @@ if ($DryRun) {
 # Results
 # --------------------------------------------------------------------------- #
 Write-Host "`n=== Comparison ===" -ForegroundColor Cyan
-python scripts/compare_runs.py --runs "lightning_logs/abl_*" --baseline abl_baseline
+& $Python scripts/compare_runs.py --runs "lightning_logs/abl_*" --baseline abl_baseline
 
 $total = (Get-Date) - $startedAll
 Write-Host "`nSweep finished in $($total.ToString('hh\:mm\:ss'))." -ForegroundColor Green

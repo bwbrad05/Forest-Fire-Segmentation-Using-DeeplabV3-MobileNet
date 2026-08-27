@@ -325,6 +325,8 @@ class IndonesiaDataModule(pl.LightningDataModule):
 
 # I/O helpers
 
+_RASTERIO_WARNED = False
+
 def _to_chw(data):
     """Normalise a raw array to (C, H, W) float32.
 
@@ -359,11 +361,18 @@ def _read_tif(path):
         with rasterio.open(path) as src:
             return _to_chw(src.read())
     except (ImportError, OSError) as e:
-        logger.warning(
-            "rasterio unavailable (%s: %s); falling back to tifffile. "
-            "This is fine — the pipeline uses pixel values only.",
-            type(e).__name__, e,
-        )
+        # Warn once per process, not once per tile: this runs for every read, so
+        # at ~181 tiles per epoch it otherwise emits tens of thousands of
+        # identical lines and buries the training metrics.
+        global _RASTERIO_WARNED
+        if not _RASTERIO_WARNED:
+            _RASTERIO_WARNED = True
+            logger.warning(
+                "rasterio unavailable (%s: %s); falling back to tifffile for all "
+                "reads. This is fine — the pipeline uses pixel values only. "
+                "(Reported once per process.)",
+                type(e).__name__, e,
+            )
 
     try:
         import tifffile

@@ -42,7 +42,7 @@ import utils
 log = logging.getLogger(__name__)
 
 
-def make_callbacks(dirpath=None):
+def make_callbacks(dirpath=None, progress="rich"):
     """Build a fresh set of callbacks.
 
     ModelCheckpoint and EarlyStopping hold per-run state (best_model_path,
@@ -52,7 +52,16 @@ def make_callbacks(dirpath=None):
     stop several runs of an ablation sweep from piling their checkpoints into
     one folder, where they collide into last.ckpt, last-v1.ckpt, last-v2.ckpt ...
     and become impossible to attribute.
+
+    ``progress`` selects the progress bar. Rich draws a live-updating region and
+    silently renders nothing when stdout is not a terminal — which happens when
+    a command is pasted as a multi-line block in PowerShell, or when output is
+    piped to a file. ``tqdm`` prints ordinary lines and works in both cases;
+    ``none`` disables the bar entirely, which is what you want when logging a
+    long run to a file.
     """
+    if progress not in ("rich", "tqdm", "none"):
+        raise ValueError(f"progress must be 'rich', 'tqdm' or 'none', got {progress!r}")
     return [
         pl.callbacks.ModelCheckpoint(
             dirpath=dirpath,
@@ -68,9 +77,11 @@ def make_callbacks(dirpath=None):
             mode="min",
         ),
         pl.callbacks.LearningRateMonitor(logging_interval="epoch"),
-        pl.callbacks.RichModelSummary(max_depth=3),
-        pl.callbacks.RichProgressBar(),
-    ]
+    ] + {
+        "rich": [pl.callbacks.RichModelSummary(max_depth=3), pl.callbacks.RichProgressBar()],
+        "tqdm": [pl.callbacks.ModelSummary(max_depth=3), pl.callbacks.TQDMProgressBar()],
+        "none": [pl.callbacks.ModelSummary(max_depth=3)],
+    }[progress]
 
 
 def default_loggers(run_name=None):
@@ -178,7 +189,7 @@ def main(cfg: DictConfig):
     if run_name:
         log.info("run_name=%s -> logs and checkpoints under lightning_logs/%s/",
                  run_name, run_name)
-    callbacks = make_callbacks(ckpt_dir)
+    callbacks = make_callbacks(ckpt_dir, cfg.get("progress_bar", "rich"))
 
     # Trainer
     trainer = pl.Trainer(
@@ -235,7 +246,9 @@ def main(cfg: DictConfig):
                 ),
                 # Per-fold checkpoint directory: without it every fold writes
                 # into the same folder and collides into last-v1, last-v2, ...
-                callbacks=make_callbacks(str(fold_dir / "checkpoints")),
+                callbacks=make_callbacks(
+                    str(fold_dir / "checkpoints"), cfg.get("progress_bar", "rich")
+                ),
             )
             fold_trainer.fit(fold_model, datamodule=fold_dm)
             results = fold_trainer.test(fold_model, datamodule=fold_dm, ckpt_path="best")

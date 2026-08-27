@@ -141,12 +141,22 @@ sys.exit(0 if ok else 1)
 
 $verifyFile = Join-Path $env:TEMP "firenet_verify.py"
 Set-Content -Path $verifyFile -Value $verify -Encoding utf8
-& $envPython $verifyFile
-$verifyExit = $LASTEXITCODE
-Remove-Item $verifyFile -ErrorAction SilentlyContinue
+
+# Python puts the *script's* directory on sys.path, not the working directory,
+# so a script living in %TEMP% cannot import this repo's packages. PYTHONPATH
+# is what makes `from neural_net import ...` resolve here.
+$prevPythonPath = $env:PYTHONPATH
+$env:PYTHONPATH = $RepoRoot
+try {
+    & $envPython $verifyFile
+    $verifyExit = $LASTEXITCODE
+} finally {
+    $env:PYTHONPATH = $prevPythonPath
+    Remove-Item $verifyFile -ErrorAction SilentlyContinue
+}
 
 if ($verifyExit -ne 0) {
-    throw "Verification failed -- see above. Do not start a training run until CUDA is available."
+    throw "Verification failed -- see the output above for which check failed. The environment itself may be fine; re-run the checks by hand from the repo root before starting a training run."
 }
 
 Write-Host @"

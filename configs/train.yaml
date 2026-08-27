@@ -19,3 +19,8 @@ ckpt_path: null
 # instead of an auto-numbered version_N, which is what makes an ablation sweep
 # readable afterwards (scripts/run_ablation.ps1 sets it per variant).
 run_name: null
+
+# rich | tqdm | none. Rich draws a live region and shows nothing when stdout is
+# not a terminal (pasted multi-line commands, piping to a file); tqdm prints
+# plain lines and always shows.
+progress_bar: rich
