@@ -1,0 +1,74 @@
+# ---------------------------------------------------------------------------
+# GPU requirements for: Segmentasi Area Kebakaran Hutan dan Lahan pada Citra
+#   Satelit - DeepLabV3+ with MobileViT backbone (Bradley Widjaja - 5025231036)
+#
+# Differences from requirements.txt, both learned the hard way on the GPU box:
+#
+#   1. torch / torchvision are NOT listed. On Windows the PyPI wheel is CPU-only
+#      (~123 MB vs ~2.5 GB for CUDA), so listing them here would silently install
+#      a CPU build and leave the GPU idle. Install from the CUDA index FIRST.
+#
+#   2. rasterio is NOT listed. Its pip wheel bundles its own GDAL, which can
+#      corrupt the heap next to conda's GDAL (silent 0xC0000374 crash), and the
+#      conda-forge build can fail with "DLL load failed while importing _base".
+#      The pipeline reads pixel arrays only -- no geospatial metadata -- so
+#      indonesia_datamodule.py falls back to tifffile, which is listed below and
+#      returns bit-identical arrays (verified: max abs diff 0.0). Install
+#      rasterio only if you need it for something else.
+#
+# Full sequence on the GPU machine:
+#
+#   conda create -n firenet python=3.11 -y
+#   conda activate firenet
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#   pip install -r requirements-gpu.txt
+#
+# Do NOT pin torch to the version in requirements.txt -- the CUDA index carries a
+# different set of releases (cu124 resolved to torch 2.6.0 / torchvision 0.21.0
+# when this was written) and an exact pin fails with "No matching distribution".
+# Swap cu124 for whatever the driver supports; see https://pytorch.org.
+#
+# Keep the stack pure-pip. Mixing conda-installed scientific packages into this
+# env pulls in a second OpenMP runtime (libiomp5md.dll beside torch's libomp.dll)
+# and the process aborts with "OMP: Error #15".
+#
+# Verify all three of these before starting a run:
+#
+#   python -c "import sys, torch; print(sys.executable); print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+#
+#   - sys.executable must point inside the firenet env (not miniconda3\base)
+#   - torch.version.cuda must NOT be None  (None == CPU wheel, reinstall)
+#   - torch.cuda.is_available() must be True
+# ---------------------------------------------------------------------------
+
+# --- Deep learning core (torch/torchvision installed separately, see above) ---
+torchmetrics==1.9.0
+pytorch-lightning==2.6.5
+
+# --- Model / backbone ---
+timm==1.0.27
+segmentation_models_pytorch==0.5.0
+
+# --- Config management ---
+hydra-core==1.3.2
+omegaconf==2.3.0
+
+# --- Data (tifffile is the GDAL-free GeoTIFF reader; see note 2 above) ---
+tifffile==2026.3.3
+numpy==2.4.6
+polars==1.41.2
+pandas==3.0.3
+pillow==12.2.0
+scikit-image==0.26.0
+
+# --- Visualisation / logging ---
+matplotlib==3.10.9
+rich==15.0.0
+# tensorboard: without it Lightning silently falls back to the CSV logger only.
+# main.py attaches BOTH when run_name is set, so `tensorboard --logdir
+# lightning_logs` works while a run is in progress and metrics.csv is still
+# written for scripts/plot_curves.py and scripts/compare_runs.py.
+tensorboard==2.20.0
+
+# --- Experiment tracking (optional; CSV logger used if absent) ---
+comet_ml==3.58.1

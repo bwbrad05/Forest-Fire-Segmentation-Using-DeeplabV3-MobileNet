@@ -14,3 +14,8 @@ defaults:
 
 mode: train          # train | test | predict | crossval | efficiency | efficiency_sweep | lr_find
 ckpt_path: null
+
+# Name this run. When set, logs and checkpoints go to lightning_logs/<run_name>/
+# instead of an auto-numbered version_N, which is what makes an ablation sweep
+# readable afterwards (scripts/run_ablation.ps1 sets it per variant).
+run_name: null

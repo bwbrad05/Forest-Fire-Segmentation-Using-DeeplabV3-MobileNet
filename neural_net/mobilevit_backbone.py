@@ -39,10 +39,15 @@ class MobileViTEncoder(nn.Module):
 
     The encoder exposes the following output levels:
       - features[0]: dummy tensor (SMP convention: index 0 = input-scale info)
-      - features[1]: stride-4  feature map  (low-level, used for skip connection)
-      - features[2]: stride-8  feature map
-      - features[3]: stride-16 feature map
-      - features[4]: stride-32 feature map  (high-level, fed to ASPP)
+      - features[1]: stride-2  feature map
+      - features[2]: stride-4  feature map  (low-level, used for skip connection)
+      - features[3]: stride-8  feature map
+      - features[4]: stride-16 feature map  (deepest level, fed to ASPP)
+
+    Verified at 512x512 input: shapes are 256, 128, 64, 32 px, i.e. strides
+    2/4/8/16. timm's MobileViT with out_indices=(0,1,2,3) bottoms out at
+    stride-16, which is what DeepLabV3+ wants for output_stride=16 -- there is
+    no stride-32 level here.
 
     Parameters
     ----------
@@ -53,7 +58,8 @@ class MobileViTEncoder(nn.Module):
     output_stride : int
         Target output stride. Only 16 is fully supported by MobileViT out-of-the-box.
     pretrained : bool
-        Whether to load ImageNet pretrained weights (only valid when in_channels == 3).
+        Load ImageNet pretrained weights. Works at any ``in_channels``: timm
+        adapts the pretrained RGB stem filters to the requested band count.
     """
 
     def __init__(
@@ -84,11 +90,20 @@ class MobileViTEncoder(nn.Module):
         # exactly what DeepLabV3+ needs for output_stride=16. We read the real
         # channel sizes from feature_info instead of hard-coding them, so the
         # decoder is always wired to match the actual encoder output.
+        # ``in_chans`` is passed to timm rather than rebuilding the stem
+        # afterwards. timm adapts the pretrained RGB stem to any band count by
+        # tiling/rescaling the three-channel filters, so ImageNet weights stay
+        # usable on 8-band Landsat. The previous form disabled transfer learning
+        # twice over: ``pretrained and in_channels == 3`` is always False here,
+        # and ``_adapt_first_conv`` then kaiming-reinitialised the stem. With
+        # 227 training tiles, training the encoder from scratch is the single
+        # biggest thing holding the scores back.
         self.backbone = timm.create_model(
             variant,
-            pretrained=(pretrained and in_channels == 3),
+            pretrained=pretrained,
             features_only=True,
             out_indices=(0, 1, 2, 3),  # reductions: 2, 4, 8, 16
+            in_chans=in_channels,
         )
 
         # SMP convention: index 0 is a dummy input-scale placeholder, followed
@@ -97,9 +112,9 @@ class MobileViTEncoder(nn.Module):
         # the low-level skip connection.
         self._out_channels = (1,) + tuple(self.backbone.feature_info.channels())
 
-        # Adapt first convolution for arbitrary in_channels
-        if in_channels != 3:
-            self._adapt_first_conv(in_channels)
+        # No stem surgery needed: timm already built it at ``in_channels`` above,
+        # preserving pretrained weights. ``set_in_channels`` remains available
+        # for reconfiguring after construction.
 
     # ---------------------------------------------------------------------- #
     # SMP-compatible interface

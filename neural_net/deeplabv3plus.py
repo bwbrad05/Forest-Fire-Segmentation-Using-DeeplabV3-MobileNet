@@ -14,6 +14,7 @@ import torchmetrics as tm
 
 import utils
 from loss import AsymmetricUnifiedFocalLoss, BCEDiceLoss
+from neural_net.enhancements import apply_enhancements
 
 
 class DeepLabV3Plus(pl.LightningModule):
@@ -37,7 +38,27 @@ class DeepLabV3Plus(pl.LightningModule):
     loss_fn : str
         'asymmetric_unified_focal' or 'bce_dice'.
     encoder_weights : str or None
-        Pretrained weights (e.g. 'imagenet'). Set None for multi-band inputs.
+        Pretrained weights (e.g. 'imagenet'), or None to train from scratch.
+        Valid for multi-band inputs — SMP adapts the first convolution.
+    attention : str or None
+        'cbam' (Zhang et al., Sci. Rep. 2024) or 'ca' (Coordinate Attention,
+        Lyu et al., J. Agric. Food Res. 2026) refines the ASPP input and the
+        low-level skip. None leaves the encoder untouched.
+    strip_pooling : bool
+        Add the strip-pooling branch to the ASPP, 5 -> 6 branches (Lyu et al.,
+        section 2.2.3).
+    decoder_attention : str or None
+        Attention block re-weighting the decoder's fused features.
+    aspp_dropout : float or None
+        Dropout on the ASPP fusion projection. None keeps SMP's own default of
+        0.5 so previously-run ablations stay reproducible.
+    bce_weight : float
+        Lambda in lambda * WCE + (1 - lambda) * Dice; only used with
+        loss_fn='bce_dice'.
+    bce_pos_weight : float
+        Per-class weight w_c for the WCE term.
+    scheduler : str
+        'poly' or 'warmup_cosine' (Lyu et al., equation 21).
     """
 
     def __init__(
@@ -49,19 +70,38 @@ class DeepLabV3Plus(pl.LightningModule):
         loss_fn: str = "asymmetric_unified_focal",
         encoder_weights: Optional[str] = None,
         tta: bool = False,
+        attention: Optional[str] = None,
+        strip_pooling: bool = False,
+        decoder_attention: Optional[str] = None,
+        aspp_dropout: Optional[float] = None,
+        bce_weight: float = 0.5,
+        bce_pos_weight: float = 10.0,
+        scheduler: str = "poly",
+        warmup_epochs: Optional[int] = None,
+        min_lr_ratio: float = 1e-3,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
 
+        # SMP rescales a pretrained first convolution to any ``in_channels``, so
+        # the old ``if n_channels == 3`` guard silently discarded ImageNet
+        # weights for every multi-band run — i.e. always, here.
         self.model = smp.DeepLabV3Plus(
             encoder_name=encoder_name,
-            encoder_weights=encoder_weights if n_channels == 3 else None,
+            encoder_weights=encoder_weights,
             in_channels=n_channels,
             classes=n_classes,
+            **({} if aspp_dropout is None else {"decoder_aspp_dropout": aspp_dropout}),
+        )
+
+        # Same helper as the MobileViT model, so every switch means the same
+        # thing across all three backbones and the ablation stays comparable.
+        apply_enhancements(
+            self.model, attention, strip_pooling, decoder_attention, aspp_dropout
         )
 
         if loss_fn == "bce_dice":
-            self.loss = BCEDiceLoss(bce_weight=0.5, pos_weight=10.0)
+            self.loss = BCEDiceLoss(bce_weight=bce_weight, pos_weight=bce_pos_weight)
             self._binary_loss = True
         else:
             self.loss = AsymmetricUnifiedFocalLoss(0.5, 0.6, 0.1)
@@ -96,10 +136,12 @@ class DeepLabV3Plus(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.learning_rate)
-        scheduler = torch.optim.lr_scheduler.PolynomialLR(
+        scheduler = utils.build_scheduler(
             optimizer,
-            total_iters=self.trainer.max_epochs if self.trainer else 60,
-            power=0.9,
+            name=self.hparams.get("scheduler", "poly"),
+            total_epochs=self.trainer.max_epochs if self.trainer else 60,
+            warmup_epochs=self.hparams.get("warmup_epochs", None),
+            min_lr_ratio=self.hparams.get("min_lr_ratio", 1e-3),
         )
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"}}
 

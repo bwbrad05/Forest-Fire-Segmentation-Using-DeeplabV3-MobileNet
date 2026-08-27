@@ -7,3 +7,4 @@ test_fold: 0            # ???  must be overridden via CLI for cross-validation
 sensor: landsat8
 patch_size: 512
 cloud_threshold: 0.3    # Skip patches with >30% cloud coverage
+spectral_indices: false # true -> append NBR/NDVI/NBR2; also set model.in_channels=11

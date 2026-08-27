@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Band normalisation statistics
 # --------------------------------------------------------------------------- #
 
-# Per-band mean/std computed from ALL 227 images of THIS dataset (first 6 bands).
+# Per-band mean/std computed from ALL 227 images of THIS dataset (all 8 bands).
 # Previous values were generic Landsat-8 SR defaults (DN 0-10000) that did NOT
 # match this dataset's scale (actual values reach ~18000), leaving inputs at
 # mean ~+12 / std ~8 instead of the intended mean~0 / std~1. Recomputed 2026-07-10.
@@ -48,6 +48,49 @@ LANDSAT8_STDS  = torch.tensor([ 6431.2,  6780.0,  6697.5, 7130.1,  7922.3,  6089
 SENSOR_STATS = {
     "landsat8":  (LANDSAT8_MEANS,  LANDSAT8_STDS),
 }
+
+
+# --------------------------------------------------------------------------- #
+# Spectral indices
+# --------------------------------------------------------------------------- #
+
+# Band positions in the 8-band stack (see the band-order note above).
+_B4_RED, _B5_NIR, _B6_SWIR1, _B7_SWIR2 = 3, 4, 5, 6
+
+SPECTRAL_INDEX_NAMES = ("NBR", "NDVI", "NBR2")
+N_SPECTRAL_INDICES = len(SPECTRAL_INDEX_NAMES)
+
+
+def _normalised_difference(a, b):
+    """(a - b) / (a + b), guarded against the 0/0 that cloud-filled pixels give."""
+    denom = a + b
+    return torch.where(
+        denom.abs() < 1e-6,
+        torch.zeros_like(denom),
+        (a - b) / torch.where(denom.abs() < 1e-6, torch.ones_like(denom), denom),
+    )
+
+
+def _spectral_indices(image):
+    """Compute (3, H, W) of NBR, NDVI, NBR2 from a RAW 8-band tensor.
+
+    Must be called before ``_normalise``: these are ratios of reflectance, and
+    (a-b)/(a+b) over z-scored values is not an index of anything.
+
+    NBR  = (NIR - SWIR2)/(NIR + SWIR2)  -- the standard burned-area index; the
+           burn signal this dataset's 6-band cut used to be missing entirely.
+    NDVI = (NIR - Red)/(NIR + Red)      -- vegetation greenness, hence its
+           absence over burn scars.
+    NBR2 = (SWIR1 - SWIR2)/(SWIR1 + SWIR2) -- sensitive to post-fire moisture
+           and char, and complementary to NBR.
+
+    All three are normalised differences, so they already land in [-1, 1] and
+    need no further scaling to sit alongside the z-scored bands.
+    """
+    nbr  = _normalised_difference(image[_B5_NIR],   image[_B7_SWIR2])
+    ndvi = _normalised_difference(image[_B5_NIR],   image[_B4_RED])
+    nbr2 = _normalised_difference(image[_B6_SWIR1], image[_B7_SWIR2])
+    return torch.stack([nbr, ndvi, nbr2], dim=0)
 
 # Cloud-masking helper
 
@@ -94,6 +137,7 @@ class IndonesiaDataset(Dataset):
         augment=False,
         cloud_threshold=0.3,
         patch_size=512,
+        spectral_indices=False,
     ):
         super().__init__()
         self.root = Path(root)
@@ -101,6 +145,7 @@ class IndonesiaDataset(Dataset):
         self.augment = augment
         self.cloud_threshold = cloud_threshold
         self.patch_size = patch_size
+        self.spectral_indices = spectral_indices
         self.means, self.stds = SENSOR_STATS[sensor]
 
         # Resolve fold membership. Prefer a reproducible splits.parquet; if it is
@@ -167,7 +212,13 @@ class IndonesiaDataset(Dataset):
                 return self[(index + 1) % len(self)]
 
         image = apply_cloud_mask(image, cloud)
+        # Indices are derived from the raw bands, then appended after the bands
+        # themselves are z-scored -- see _spectral_indices for why the order
+        # matters.
+        indices = _spectral_indices(image) if self.spectral_indices else None
         image = self._normalise(image)
+        if indices is not None:
+            image = torch.cat([image, indices], dim=0)
         image = _ensure_size(image, self.patch_size)
         mask  = _ensure_size(mask,  self.patch_size, is_mask=True)
 
@@ -209,6 +260,9 @@ class IndonesiaDataModule(pl.LightningDataModule):
     sensor : str  'landsat8'
     patch_size : int
     cloud_threshold : float
+    spectral_indices : bool
+        Append NBR, NDVI and NBR2 as three extra input channels. When enabled the
+        model's ``in_channels`` must be raised from 8 to 11 to match.
     """
 
     def __init__(
@@ -220,6 +274,7 @@ class IndonesiaDataModule(pl.LightningDataModule):
         sensor="landsat8",
         patch_size=512,
         cloud_threshold=0.3,
+        spectral_indices=False,
         **kwargs,
     ):
         super().__init__()
@@ -243,6 +298,7 @@ class IndonesiaDataModule(pl.LightningDataModule):
             sensor=hp.sensor,
             patch_size=hp.patch_size,
             cloud_threshold=hp.cloud_threshold,
+            spectral_indices=hp.spectral_indices,
         )
         if stage in ("fit", None):
             self.train_dataset = IndonesiaDataset(folds=self._fold_map["train"], augment=True,  **kw)
@@ -269,20 +325,55 @@ class IndonesiaDataModule(pl.LightningDataModule):
 
 # I/O helpers
 
+def _to_chw(data):
+    """Normalise a raw array to (C, H, W) float32.
+
+    Readers disagree on layout: rasterio yields (C, H, W), tifffile yields
+    (H, W, C) for contiguous-planar files, and masks come back 2-D. Band counts
+    are small (8) next to the 512-px spatial dims, so the short axis is the
+    channel axis.
+    """
+    data = data.astype(np.float32)
+    if data.ndim == 2:
+        data = data[np.newaxis]
+    elif data.ndim == 3 and data.shape[-1] < data.shape[0]:
+        data = np.transpose(data, (2, 0, 1))
+    return torch.from_numpy(np.ascontiguousarray(data))
+
+
 def _read_tif(path):
-    """Read a GeoTIFF and return float32 tensor of shape (C, H, W)."""
+    """Read a GeoTIFF and return float32 tensor of shape (C, H, W).
+
+    Three readers are tried in order because GDAL is the fragile part of this
+    stack on Windows: a pip rasterio wheel bundles its own GDAL and can corrupt
+    the heap next to conda's (silent 0xC0000374 crash), while a mismatched
+    conda-forge build fails with "DLL load failed while importing _base".
+
+    Nothing downstream uses geospatial metadata — only the pixel array — so
+    tifffile is a complete substitute and needs no GDAL at all. It is the
+    fallback rather than the default so that correctly-installed machines keep
+    rasterio's broader format support.
+    """
     try:
         import rasterio
         with rasterio.open(path) as src:
-            data = src.read().astype(np.float32)
-        return torch.from_numpy(data)
+            return _to_chw(src.read())
+    except (ImportError, OSError) as e:
+        logger.warning(
+            "rasterio unavailable (%s: %s); falling back to tifffile. "
+            "This is fine — the pipeline uses pixel values only.",
+            type(e).__name__, e,
+        )
+
+    try:
+        import tifffile
+        return _to_chw(tifffile.imread(str(path)))
     except ImportError:
-        # Fallback: use xarray (available in original codebase)
-        import xarray as xr
-        data = xr.open_dataarray(path).fillna(0).to_numpy().astype(np.float32)
-        if data.ndim == 2:
-            data = data[np.newaxis]
-        return torch.from_numpy(data)
+        pass
+
+    # Last resort: xarray, as in the original codebase.
+    import xarray as xr
+    return _to_chw(xr.open_dataarray(path).fillna(0).to_numpy())
 
 
 def _ensure_size(tensor, size, is_mask=False):
@@ -298,8 +389,17 @@ def _ensure_size(tensor, size, is_mask=False):
 
 # Augmentation
 
-def _build_augmentation():
-    def augment(image, mask):
+class _Augmentation:
+    """Random flips / 90° rotations / intensity shift.
+
+    Defined at module level (not a nested closure) so that a Dataset holding an
+    instance stays picklable — DataLoader workers on spawn/forkserver platforms
+    (Windows, and Python 3.14+ on POSIX) must pickle the dataset to hand it to
+    each worker, and a local closure would raise
+    ``Can't pickle local object '_build_augmentation.<locals>.augment'``.
+    """
+
+    def __call__(self, image, mask):
         if random.random() < 0.5:
             image = torch.flip(image, dims=[-1])
             mask  = torch.flip(mask,  dims=[-1])
@@ -314,4 +414,7 @@ def _build_augmentation():
             shift = torch.empty(image.shape[0], 1, 1).uniform_(-0.1, 0.1)
             image = image + shift
         return image, mask
-    return augment
+
+
+def _build_augmentation():
+    return _Augmentation()

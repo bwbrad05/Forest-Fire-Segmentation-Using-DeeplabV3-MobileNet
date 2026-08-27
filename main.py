@@ -42,14 +42,20 @@ import utils
 log = logging.getLogger(__name__)
 
 
-def make_callbacks():
+def make_callbacks(dirpath=None):
     """Build a fresh set of callbacks.
 
     ModelCheckpoint and EarlyStopping hold per-run state (best_model_path,
     patience counters), so each cross-validation fold needs its own instances.
+
+    ``dirpath=None`` keeps Lightning's default location. Pass a directory to
+    stop several runs of an ablation sweep from piling their checkpoints into
+    one folder, where they collide into last.ckpt, last-v1.ckpt, last-v2.ckpt ...
+    and become impossible to attribute.
     """
     return [
         pl.callbacks.ModelCheckpoint(
+            dirpath=dirpath,
             monitor="val_loss",
             save_top_k=3,
             mode="min",
@@ -65,6 +71,33 @@ def make_callbacks():
         pl.callbacks.RichModelSummary(max_depth=3),
         pl.callbacks.RichProgressBar(),
     ]
+
+
+def default_loggers(run_name=None):
+    """Local loggers to use when Comet is unavailable or disabled.
+
+    Without ``run_name`` this returns ``True``, i.e. Lightning's own default —
+    unchanged behaviour, runs land in auto-numbered ``lightning_logs/version_N``.
+
+    With ``run_name`` every run gets its own ``lightning_logs/<run_name>/``
+    subtree, which is what makes an ablation sweep readable afterwards. Both
+    TensorBoard and CSV are attached: TensorBoard for watching a run live, CSV
+    because ``scripts/plot_curves.py`` and ``scripts/compare_runs.py`` read
+    ``metrics.csv``. TensorBoard is skipped if it is not installed.
+    """
+    if not run_name:
+        return True
+
+    active = [loggers.CSVLogger(save_dir="lightning_logs", name=run_name)]
+    try:
+        import tensorboard  # noqa: F401
+    except ImportError:
+        log.warning("tensorboard not installed — logging to CSV only.")
+    else:
+        active.insert(
+            0, loggers.TensorBoardLogger(save_dir="lightning_logs", name=run_name)
+        )
+    return active
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="train")
@@ -121,7 +154,10 @@ def main(cfg: DictConfig):
     # ------------------------------------------------------------------ #
     # Logger
     # ------------------------------------------------------------------ #
-    experiment_name = f"{pl_model.__class__.__name__}_{cfg.get('model_name', '')}"
+    run_name = cfg.get("run_name", None)
+    experiment_name = run_name or (
+        f"{pl_model.__class__.__name__}_{cfg.get('model_name', '')}"
+    )
     if cfg.get("logger"):
         try:
             logger = loggers.CometLogger(
@@ -130,16 +166,19 @@ def main(cfg: DictConfig):
         except ValueError as e:
             # Fall back to TensorBoard if Comet API key is missing
             if "API key" in str(e):
-                log.warning("Comet API key not found; using TensorBoard instead")
-                logger = True
+                log.warning("Comet API key not found; logging locally instead")
+                logger = default_loggers(run_name)
             else:
                 raise
     else:
-        logger = True   # default TensorBoard
+        logger = default_loggers(run_name)
 
     # Callbacks
-
-    callbacks = make_callbacks()
+    ckpt_dir = str(Path("lightning_logs") / run_name / "checkpoints") if run_name else None
+    if run_name:
+        log.info("run_name=%s -> logs and checkpoints under lightning_logs/%s/",
+                 run_name, run_name)
+    callbacks = make_callbacks(ckpt_dir)
 
     # Trainer
     trainer = pl.Trainer(
@@ -182,14 +221,21 @@ def main(cfg: DictConfig):
             # Same protocol as `mode=train`: monitored checkpointing so that
             # ckpt_path="best" below resolves to the best-val_loss epoch rather
             # than the last one, plus a per-fold CSV log for the loss/IoU curves.
+            fold_dir = (
+                Path("lightning_logs")
+                / f"crossval_{cfg.get('run_name') or cfg.get('model_name', 'model')}"
+                / f"fold{fold}"
+            )
             fold_trainer = pl.Trainer(
                 **cfg["trainer"],
                 logger=loggers.CSVLogger(
                     "lightning_logs",
-                    name=f"crossval_{cfg.get('model_name', 'model')}",
+                    name=fold_dir.parent.name,
                     version=f"fold{fold}",
                 ),
-                callbacks=make_callbacks(),
+                # Per-fold checkpoint directory: without it every fold writes
+                # into the same folder and collides into last-v1, last-v2, ...
+                callbacks=make_callbacks(str(fold_dir / "checkpoints")),
             )
             fold_trainer.fit(fold_model, datamodule=fold_dm)
             results = fold_trainer.test(fold_model, datamodule=fold_dm, ckpt_path="best")

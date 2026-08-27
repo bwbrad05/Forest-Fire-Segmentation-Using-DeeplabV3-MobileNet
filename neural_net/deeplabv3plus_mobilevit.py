@@ -16,6 +16,7 @@ from torch.nn import functional as F
 
 import utils
 from loss import AsymmetricUnifiedFocalLoss, BCEDiceLoss
+from neural_net.enhancements import apply_enhancements
 from neural_net.mobilevit_backbone import MobileViTEncoder
 
 
@@ -28,6 +29,10 @@ def _build_model(
     in_channels: int,
     n_classes: int,
     encoder_weights: Optional[str],
+    attention: Optional[str] = None,
+    strip_pooling: bool = False,
+    decoder_attention: Optional[str] = None,
+    aspp_dropout: Optional[float] = None,
 ) -> nn.Module:
     """
     Build a DeepLabV3+ model with the requested backbone.
@@ -44,7 +49,21 @@ def _build_model(
     n_classes : int
         Number of segmentation classes (2 for binary burned/non-burned).
     encoder_weights : str or None
-        Pretrained weights tag (e.g. 'imagenet'). Only valid when in_channels == 3.
+        Pretrained weights tag (e.g. 'imagenet'), or None to train from scratch.
+        Valid at any ``in_channels`` — both timm and SMP adapt the pretrained
+        first convolution to the requested band count.
+    attention : str or None
+        'cbam' or 'ca' wraps the encoder so the ASPP input and the low-level
+        skip are refined by that attention block. None leaves the encoder
+        untouched.
+    strip_pooling : bool
+        Add the strip-pooling branch to the ASPP (5 -> 6 branches).
+    decoder_attention : str or None
+        Attention block re-weighting the decoder's fused features.
+    aspp_dropout : float or None
+        Dropout on the ASPP fusion projection. None keeps each path's existing
+        default (0.0 for MobileViT, SMP's own 0.5 for the ablation encoders) so
+        previous runs stay reproducible; set a number to pin both paths to it.
 
     Returns
     -------
@@ -81,7 +100,7 @@ def _build_model(
             encoder_channels=encoder.out_channels,
             encoder_depth=len(encoder.out_channels) - 1,
             aspp_separable=False,
-            aspp_dropout=0.0,
+            aspp_dropout=0.0 if aspp_dropout is None else aspp_dropout,
             out_channels=256,
             atrous_rates=(6, 12, 18),
             output_stride=16,
@@ -93,17 +112,31 @@ def _build_model(
             activation=None,
             upsampling=4,
         )
-        return model
+        # Applied after the decoder is built: the encoder wrapper preserves
+        # out_channels, so the wiring above is unaffected, and the ASPP surgery
+        # needs the decoder to exist.
+        return apply_enhancements(
+            model, attention, strip_pooling, decoder_attention, aspp_dropout
+        )
 
     else:
         # ------------------------------------------------------------------ #
         # SMP-native path: ResNet / MobileNetV3 via segmentation_models_pytorch
         # ------------------------------------------------------------------ #
-        return smp.DeepLabV3Plus(
+        # SMP adapts pretrained encoder weights to any ``in_channels`` itself
+        # (it rescales the first conv), so the old ``if in_channels == 3`` guard
+        # silently forced the ablations to train from scratch as well. Keeping
+        # pretraining on for all three backbones is also what makes the ablation
+        # a fair comparison.
+        model = smp.DeepLabV3Plus(
             encoder_name=backbone,
-            encoder_weights=encoder_weights if in_channels == 3 else None,
+            encoder_weights=encoder_weights,
             in_channels=in_channels,
             classes=n_classes,
+            **({} if aspp_dropout is None else {"decoder_aspp_dropout": aspp_dropout}),
+        )
+        return apply_enhancements(
+            model, attention, strip_pooling, decoder_attention, aspp_dropout
         )
 
 
@@ -141,9 +174,43 @@ class DeepLabV3PlusMobileViT(pl.LightningModule):
     loss_fn : str
         Loss function. One of 'asymmetric_unified_focal' (default) or 'bce_dice'.
     encoder_weights : str or None
-        Pretrained weights tag. Set None when in_channels != 3.
+        Pretrained weights tag, e.g. 'imagenet'. Valid at any band count.
     bce_pos_weight : float
         Positive class weight for BCE+Dice loss (only used when loss_fn='bce_dice').
+        This is the per-class weight w_c of the wheat paper's Weighted
+        Cross-Entropy, equation (10) — they set it to N_total / N_c over the whole
+        training set. ``scripts/class_weight.py`` computes that value for this
+        dataset.
+    bce_weight : float
+        The wheat paper's lambda in L_total = lambda * L_WCE + (1 - lambda) * L_Dice
+        (equation 12). Their grid search over 0.1-0.9 peaks at 0.6 (their Table 5).
+        Only used when loss_fn='bce_dice'.
+    attention : str or None
+        Attention block on the ASPP input and the low-level skip.
+        'cbam' — Convolutional Block Attention Module. Zhang et al. (Sci. Rep.
+        2024) report it as the largest single gain for lightweight DeepLabV3+
+        burned-area mapping (+7.15 MIoU), ahead of transfer learning.
+        'ca' — Coordinate Attention. Lyu et al. (J. Agric. Food Res. 2026) pair
+        it with strip pooling for +6.28 mIoU over their DeepLabV3+ baseline.
+    strip_pooling : bool
+        Add the strip-pooling branch to the ASPP, 5 -> 6 branches (Lyu et al.,
+        section 2.2.3). Designed for elongated targets; burn-scar boundaries
+        follow ridges, rivers and plantation edges rather than forming blobs.
+    decoder_attention : str or None
+        Attention block re-weighting the decoder's fused features — the paper's
+        "dynamic weight allocation" (their equations 19-20).
+    aspp_dropout : float or None
+        Dropout on the ASPP fusion projection. None keeps the existing default
+        (0.0 here). The paper uses 0.5, which is contraindicated while this model
+        is still underfitting.
+    scheduler : str
+        'poly' (DeepLab default, power 0.9) or 'warmup_cosine' (the paper's
+        equation 21: quadratic warm-up then cosine annealing).
+    warmup_epochs : int or None
+        Warm-up length for 'warmup_cosine'. None -> 10 % of max_epochs, as the
+        paper specifies.
+    min_lr_ratio : float
+        lr_min / lr_init for 'warmup_cosine'. The paper's 5e-6 / 5e-3 = 1e-3.
     tta : bool
         If True, apply 8-way (D4) test-time augmentation during ``test``/``predict``:
         each tile is predicted in all flip/rotation orientations and the class
@@ -160,17 +227,36 @@ class DeepLabV3PlusMobileViT(pl.LightningModule):
         loss_fn: Literal["asymmetric_unified_focal", "bce_dice"] = "asymmetric_unified_focal",
         encoder_weights: Optional[str] = None,
         bce_pos_weight: float = 10.0,
+        bce_weight: float = 0.5,
         tta: bool = False,
+        attention: Optional[str] = None,
+        strip_pooling: bool = False,
+        decoder_attention: Optional[str] = None,
+        aspp_dropout: Optional[float] = None,
+        scheduler: Literal["poly", "warmup_cosine"] = "poly",
+        warmup_epochs: Optional[int] = None,
+        min_lr_ratio: float = 1e-3,
     ):
         super().__init__()
         self.save_hyperparameters()
 
         # Model ------------------------------------------------------------ #
-        self.model = _build_model(backbone, in_channels, n_classes, encoder_weights)
+        self.model = _build_model(
+            backbone,
+            in_channels,
+            n_classes,
+            encoder_weights,
+            attention,
+            strip_pooling,
+            decoder_attention,
+            aspp_dropout,
+        )
 
         # Loss ------------------------------------------------------------- #
         if loss_fn == "bce_dice":
-            self.loss = BCEDiceLoss(bce_weight=0.5, pos_weight=bce_pos_weight)
+            # bce_weight is the paper's lambda; pos_weight is its w_c, so this
+            # branch *is* their WCE + Dice joint objective (equations 10-12).
+            self.loss = BCEDiceLoss(bce_weight=bce_weight, pos_weight=bce_pos_weight)
             self._binary_loss = True
         else:
             self.loss = AsymmetricUnifiedFocalLoss(weight=0.5, delta=0.6, gamma=0.1)
@@ -324,10 +410,13 @@ class DeepLabV3PlusMobileViT(pl.LightningModule):
             lr=self.hparams.learning_rate,
             weight_decay=1e-4,
         )
-        scheduler = torch.optim.lr_scheduler.PolynomialLR(
+        total_epochs = self.trainer.max_epochs if self.trainer else 60
+        scheduler = utils.build_scheduler(
             optimizer,
-            total_iters=self.trainer.max_epochs if self.trainer else 60,
-            power=0.9,           # Common in DeepLab training schedules
+            name=self.hparams.get("scheduler", "poly"),
+            total_epochs=total_epochs,
+            warmup_epochs=self.hparams.get("warmup_epochs", None),
+            min_lr_ratio=self.hparams.get("min_lr_ratio", 1e-3),
         )
         return {
             "optimizer": optimizer,

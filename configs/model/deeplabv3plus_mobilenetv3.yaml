@@ -8,5 +8,24 @@ n_channels: 8             # Landsat-8: B1 B2 B3 B4 B5 B6 B7 B9 (paper Table I)
 n_classes: 2
 learning_rate: 1.0e-4
 loss_fn: asymmetric_unified_focal
-encoder_weights: null
+encoder_weights: imagenet   # ImageNet transfer; set null to ablate against from-scratch
 tta: false                # set true (model.tta=true) for 8-way test-time augmentation
+# --- Enhanced DeepLabV3+ modules (Lyu et al., J. Agric. Food Res. 26 (2026) 102680) ---
+# Their Table 4 credits strip pooling + coordinate attention with +6.28 mIoU over
+# the DeepLabV3+ baseline. Each switch is separate so it can be ablated alone.
+attention: null           # cbam | ca -> attention on the ASPP input & low-level skip
+strip_pooling: false      # true -> adds a 6th, strip-pooling branch to the ASPP (their 2.2.3)
+decoder_attention: null   # ca -> re-weights the fused decoder features (their eq. 19-20)
+aspp_dropout: null        # null keeps this model's existing default; the paper uses 0.5,
+                          # which is contraindicated while this model is underfitting
+
+# --- Training schedule -------------------------------------------------------
+scheduler: poly           # poly (DeepLab default) | warmup_cosine (their eq. 21)
+warmup_epochs: null       # warmup_cosine only; null -> 10% of max_epochs, as they specify
+min_lr_ratio: 1.0e-3      # warmup_cosine only; lr_min / lr_init (theirs: 5e-6 / 5e-3)
+
+# --- Loss (only used when loss_fn=bce_dice) ----------------------------------
+# BCE+Dice with a class weight IS the paper's WCE + Dice joint objective (eq. 10-12).
+bce_weight: 0.5           # lambda in lambda*WCE + (1-lambda)*Dice; their grid search peaks at 0.6
+bce_pos_weight: 18.168    # measured N_background / N_burned over the training folds
+                          # (python scripts/class_weight.py) — burned pixels are 5.2% here

@@ -237,6 +237,9 @@ Pixel-level cross-entropy + region-level Dice overlap.
 ├── neural_net/
 │   ├── __init__.py
 │   ├── mobilevit_backbone.py       ← MobileViT encoder (timm wrapper)
+│   ├── attention.py                ← CBAM + Coordinate Attention, encoder/decoder wrappers
+│   ├── strip_pooling.py            ← Strip-pooling ASPP branch (5 → 6 branches)
+│   ├── enhancements.py             ← Applies the optional modules to a built model
 │   ├── deeplabv3plus_mobilevit.py  ← Primary Lightning module
 │   └── deeplabv3plus.py            ← Ablation baseline Lightning module
 ├── lightning_modules/
@@ -249,6 +252,8 @@ Pixel-level cross-entropy + region-level Dice overlap.
 ├── utils/
 │   ├── __init__.py
 │   ├── conversions.py              ← Visualisation helpers
+│   ├── schedulers.py               ← poly / warm-up + cosine LR schedules
+│   ├── tta.py                      ← 8-way test-time augmentation
 │   └── efficiency.py               ← Parameter count / inference timing
 └── dict_transforms/
     └── dict_transforms.py          ← Spatial augmentation transforms
@@ -262,8 +267,11 @@ Pixel-level cross-entropy + region-level Dice overlap.
 # Override batch size and test fold via CLI
 python main.py dataset.batch_size=4 dataset.test_fold=2
 
-# Use BCE+Dice loss instead of focal
-python main.py model.loss_fn=bce_dice
+# Use BCE+Dice loss instead of focal (= weighted CE + Dice)
+python main.py model.loss_fn=bce_dice model.bce_weight=0.6
+
+# Enhanced DeepLabV3+ modules (see CHANGES_SINCE_MEETING.md Part F)
+python main.py model.strip_pooling=true model.attention=ca
 
 # CPU debug run
 python main.py trainer=default_cpu dataset.test_fold=0

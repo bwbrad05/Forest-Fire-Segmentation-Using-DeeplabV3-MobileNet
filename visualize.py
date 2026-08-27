@@ -42,9 +42,18 @@ from omegaconf import DictConfig
 log = logging.getLogger(__name__)
 
 # Landsat-8 band order in the input tensor (see indonesia_datamodule.py):
-#   idx 0=B2 Blue, 1=B3 Green, 2=B4 Red, 3=B5 NIR, 4=B6 SWIR1, 5=B7 SWIR2
-TRUE_COLOR = (2, 1, 0)          # Red, Green, Blue      → natural colour
-BURN_COLOR = (5, 3, 2)          # SWIR2, NIR, Red       → burn-scar false colour
+#   8-band stack (current): 0=B1 Coastal 1=B2 Blue 2=B3 Green 3=B4 Red
+#                           4=B5 NIR     5=B6 SWIR1 6=B7 SWIR2 7=B9 Cirrus
+#   6-band stack (legacy):  0=B2 Blue 1=B3 Green 2=B4 Red 3=B5 NIR 4=B6 SWIR1 5=B7 SWIR2
+# The two stacks are offset by one, so the display bands must be picked from the
+# channel count rather than hard-coded — otherwise the 8-band inputs render as
+# B3/B2/B1 and the "burn" composite loses SWIR2 entirely.
+BANDS_8 = {"true": (3, 2, 1), "burn": (6, 4, 3)}   # B4/B3/B2 · B7/B5/B4
+BANDS_6 = {"true": (2, 1, 0), "burn": (5, 3, 2)}   # B4/B3/B2 · B7/B5/B4
+
+
+def _band_map(n_channels: int):
+    return BANDS_8 if n_channels >= 8 else BANDS_6
 
 
 def _percentile_stretch(chw: torch.Tensor, p_low: float = 2.0, p_high: float = 98.0):
@@ -90,8 +99,9 @@ def _predict(model, image: torch.Tensor):
 
 def _build_panel(image, gt_mask, pred_mask, burned_prob, title):
     """Assemble a single matplotlib figure for one sample."""
-    true_rgb = _rgb_uint8(image, TRUE_COLOR)
-    burn_rgb = _rgb_uint8(image, BURN_COLOR)
+    bands = _band_map(image.shape[0])
+    true_rgb = _rgb_uint8(image, bands["true"])
+    burn_rgb = _rgb_uint8(image, bands["burn"])
 
     gt = (gt_mask > 0).cpu()
     pr = (pred_mask > 0).cpu()
