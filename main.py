@@ -269,7 +269,13 @@ def main(cfg: DictConfig):
                 print(f"  {key:<35s}: {mean:.4f} ± {std:.4f}")
             print("=" * 47 + "\n")
 
-            out_dir = Path("lightning_logs") / f"crossval_{cfg.get('model_name', 'model')}"
+            # Must match the per-fold directory built above, which prefers
+            # run_name — otherwise the folds and their summary land in two
+            # different folders.
+            out_dir = (
+                Path("lightning_logs")
+                / f"crossval_{cfg.get('run_name') or cfg.get('model_name', 'model')}"
+            )
             out_dir.mkdir(parents=True, exist_ok=True)
             with open(out_dir / "summary.csv", "w", newline="", encoding="utf8") as fh:
                 writer = csv.writer(fh)

@@ -306,18 +306,28 @@ class IndonesiaDataModule(pl.LightningDataModule):
         if stage in ("test", "predict", None):
             self.test_dataset  = IndonesiaDataset(folds=self._fold_map["test"],  augment=False, **kw)
 
-    def _loader(self, dataset, shuffle=False):
+    def _loader(self, dataset, shuffle=False, drop_last=False):
         return DataLoader(
             dataset,
             batch_size=self.hparams.batch_size,
             num_workers=self.hparams.num_workers,
             shuffle=shuffle,
             pin_memory=True,
-            drop_last=False,
+            drop_last=drop_last,
             persistent_workers=self.hparams.num_workers > 0,
         )
 
-    def train_dataloader(self):   return self._loader(self.train_dataset, shuffle=True)
+    # drop_last on TRAIN only. A trailing batch of one sample crashes BatchNorm
+    # in training mode -- the ASPP pooling branch reduces to 1x1 spatially, so
+    # the tensor is [1, C, 1, 1] and there is no batch to compute statistics
+    # over. It bites whenever len(train) % batch_size == 1, which for this
+    # dataset is cross-validation folds 2 and 3 (137 training tiles at
+    # batch_size 8 = 17 full batches plus one of 1).
+    #
+    # Val/test keep every sample: BatchNorm uses running statistics in eval
+    # mode, so a batch of one is fine there, and dropping tiles would silently
+    # change the metric denominator.
+    def train_dataloader(self):   return self._loader(self.train_dataset, shuffle=True, drop_last=True)
     def val_dataloader(self):     return self._loader(self.val_dataset)
     def test_dataloader(self):    return self._loader(self.test_dataset)
     def predict_dataloader(self): return self._loader(self.test_dataset)
