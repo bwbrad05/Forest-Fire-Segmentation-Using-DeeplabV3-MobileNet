@@ -8,3 +8,5 @@ sensor: landsat8
 patch_size: 512
 cloud_threshold: 0.3    # Skip patches with >30% cloud coverage
 spectral_indices: false # true -> append NBR/NDVI/NBR2; also set model.in_channels=11
+exclude_file: null      # e.g. configs/exclusions/smoke_tiles.txt -> drop the listed tiles
+exclude_from: train     # train | all  (all also drops them from validation and test)

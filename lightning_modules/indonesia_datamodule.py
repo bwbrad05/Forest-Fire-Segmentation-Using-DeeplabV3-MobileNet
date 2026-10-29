@@ -138,6 +138,7 @@ class IndonesiaDataset(Dataset):
         cloud_threshold=0.3,
         patch_size=512,
         spectral_indices=False,
+        exclude=None,
     ):
         super().__init__()
         self.root = Path(root)
@@ -176,6 +177,11 @@ class IndonesiaDataset(Dataset):
             all_files = sorted(p.stem for p in (self.root / "images").glob("*.tif"))
             fold_map = assign_scene_folds(all_files, n_folds=5)
             file_ids = [f for f in all_files if fold_map[f] in folds]
+
+        if exclude:
+            kept = [f for f in file_ids if f not in exclude]
+            logger.info("IndonesiaDataset: excluded %d of %d tiles", len(file_ids) - len(kept), len(file_ids))
+            file_ids = kept
 
         self.samples = []
         for fid in file_ids:
@@ -263,6 +269,13 @@ class IndonesiaDataModule(pl.LightningDataModule):
     spectral_indices : bool
         Append NBR, NDVI and NBR2 as three extra input channels. When enabled the
         model's ``in_channels`` must be raised from 8 to 11 to match.
+    exclude_file : str or None
+        Text file of tile ids (one per line, ``#`` comments allowed) to drop, e.g.
+        ``configs/exclusions/smoke_tiles.txt``.
+    exclude_from : {"train", "all"}
+        ``"train"`` drops them from the training folds only, so validation and test
+        stay identical to a run without the list; ``"all"`` also drops them from
+        validation and test.
     """
 
     def __init__(
@@ -275,10 +288,16 @@ class IndonesiaDataModule(pl.LightningDataModule):
         patch_size=512,
         cloud_threshold=0.3,
         spectral_indices=False,
+        exclude_file=None,
+        exclude_from="train",
         **kwargs,
     ):
         super().__init__()
         self.save_hyperparameters()
+
+        if exclude_from not in ("train", "all"):
+            raise ValueError(f"exclude_from must be 'train' or 'all', got {exclude_from!r}")
+        self._exclude = _read_id_list(exclude_file) if exclude_file else frozenset()
 
         val_fold    = (test_fold + 1) % 5
         train_folds = [f for f in range(5) if f not in (test_fold, val_fold)]
@@ -300,11 +319,12 @@ class IndonesiaDataModule(pl.LightningDataModule):
             cloud_threshold=hp.cloud_threshold,
             spectral_indices=hp.spectral_indices,
         )
+        eval_exclude = self._exclude if hp.exclude_from == "all" else None
         if stage in ("fit", None):
-            self.train_dataset = IndonesiaDataset(folds=self._fold_map["train"], augment=True,  **kw)
-            self.val_dataset   = IndonesiaDataset(folds=self._fold_map["val"],   augment=False, **kw)
+            self.train_dataset = IndonesiaDataset(folds=self._fold_map["train"], augment=True,  exclude=self._exclude, **kw)
+            self.val_dataset   = IndonesiaDataset(folds=self._fold_map["val"],   augment=False, exclude=eval_exclude, **kw)
         if stage in ("test", "predict", None):
-            self.test_dataset  = IndonesiaDataset(folds=self._fold_map["test"],  augment=False, **kw)
+            self.test_dataset  = IndonesiaDataset(folds=self._fold_map["test"],  augment=False, exclude=eval_exclude, **kw)
 
     def _loader(self, dataset, shuffle=False, drop_last=False):
         return DataLoader(
@@ -336,6 +356,14 @@ class IndonesiaDataModule(pl.LightningDataModule):
 # I/O helpers
 
 _RASTERIO_WARNED = False
+
+
+def _read_id_list(path):
+    """Tile ids from a text file, skipping blank lines and ``#`` comments."""
+    with open(path, encoding="utf8") as fh:
+        return frozenset(
+            line.strip() for line in fh if line.strip() and not line.lstrip().startswith("#")
+        )
 
 def _to_chw(data):
     """Normalise a raw array to (C, H, W) float32.
