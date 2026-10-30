@@ -380,14 +380,19 @@ class DeepLabV3PlusMobileViT(pl.LightningModule):
 
         self.test_metrics.update(preds, masks.long())
 
-        if batch_idx in self.batch_to_log and self.logger is not None:
+        # Only draw when the logger can store figures: the CSV logger cannot, and
+        # the unused 20x20-inch figures made the last test batch very slow.
+        if (
+            batch_idx in self.batch_to_log
+            and self.logger is not None
+            and hasattr(self.logger.experiment, "log_figure")
+        ):
             for i, figure in enumerate(utils.draw_figure(masks, preds)):
-                if hasattr(self.logger.experiment, "log_figure"):
-                    self.logger.experiment.log_figure(
-                        figure=figure,
-                        figure_name=f"testS{self.global_step}N{i}",
-                        step=self.global_step,
-                    )
+                self.logger.experiment.log_figure(
+                    figure=figure,
+                    figure_name=f"testS{self.global_step}N{i}",
+                    step=self.global_step,
+                )
 
     def on_test_epoch_end(self):
         metrics = self.test_metrics.compute()
